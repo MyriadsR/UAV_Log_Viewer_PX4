@@ -12,7 +12,7 @@
         </li>
         <div @click="browse" @dragover.prevent @drop="onDrop" id="drop_zone"
         v-if="file==null && uploadpercentage===-1  && !sampleLoaded">
-            <p>Drop *.tlog or *.bin file here or click to browse</p>
+            <p>Drop *.tlog, *.bin or *.ulg file here or click to browse</p>
             <input @change="onChange" id="choosefile" style="opacity: 0;" type="file">
         </div>
         <!--<b-form-checkbox @change="uploadFile()" class="uploadCheckbox" v-if="file!=null && !uploadStarted"> Upload
@@ -63,6 +63,26 @@ export default {
         this.$eventHub.$off('open-sample')
     },
     methods: {
+        resetStateForNewFile () {
+            this.state.messages = {}
+            this.state.messageTypes = {}
+            this.state.processDone = false
+            this.state.plotOn = false
+            this.state.processStatus = 'Pre-processing...'
+            this.state.processPercentage = 100
+            this.state.mapAvailable = false
+            this.state.showMap = false
+            this.state.mapLoading = false
+            this.state.mapError = null
+            this.state.mapDebug = ''
+            this.state.trajectorySources = []
+            this.state.trajectorySource = ''
+            this.state.trajectories = {}
+            this.state.currentTrajectory = []
+            this.state.timeTrajectory = {}
+            this.state.timeAttitude = {}
+            this.state.timeAttitudeQ = {}
+        },
         trimFile () {
             worker.postMessage({ action: 'trimFile', time: this.state.timeRange })
         },
@@ -78,11 +98,15 @@ export default {
                 const urlParts = url.split('/')
                 this.state.file = urlParts[urlParts.length - 1]
             }
+            this.resetStateForNewFile()
             const oReq = new XMLHttpRequest()
             console.log(`loading file from ${url}`)
 
             // Set the log type based on file extension
             this.state.logType = url.indexOf('.tlog') > 0 ? 'tlog' : 'bin'
+            if (url.indexOf('.ulg') > 0) {
+                this.state.logType = 'px4'
+            }
             if (url.indexOf('.txt') > 0) {
                 this.state.logType = 'dji'
             }
@@ -100,6 +124,7 @@ export default {
                     action: 'parse',
                     file: arrayBuffer,
                     isTlog: (url.indexOf('.tlog') > 0),
+                    isUlog: (url.indexOf('.ulg') > 0),
                     isDji: (url.indexOf('.txt') > 0)
                 })
             }
@@ -147,9 +172,9 @@ export default {
             })
         },
         process: function (file) {
+            const fileName = file.name.toLowerCase()
             this.state.file = file.name
-            this.state.processStatus = 'Pre-processing...'
-            this.state.processPercentage = 100
+            this.resetStateForNewFile()
             this.file = file
             const reader = new FileReader()
             reader.onload = function (e) {
@@ -157,12 +182,16 @@ export default {
                 worker.postMessage({
                     action: 'parse',
                     file: data,
-                    isTlog: (file.name.endsWith('tlog')),
-                    isDji: (file.name.endsWith('txt'))
+                    isTlog: fileName.endsWith('.tlog'),
+                    isUlog: fileName.endsWith('.ulg'),
+                    isDji: fileName.endsWith('.txt')
                 })
             }
-            this.state.logType = file.name.endsWith('tlog') ? 'tlog' : 'bin'
-            if (file.name.endsWith('.txt')) {
+            this.state.logType = fileName.endsWith('.tlog') ? 'tlog' : 'bin'
+            if (fileName.endsWith('.ulg')) {
+                this.state.logType = 'px4'
+            }
+            if (fileName.endsWith('.txt')) {
                 this.state.logType = 'dji'
             }
             reader.readAsArrayBuffer(file)
@@ -234,6 +263,7 @@ export default {
                     action: 'parse',
                     file: event.data.data,
                     isTlog: false,
+                    isUlog: false,
                     isDji: false
                 })
             }

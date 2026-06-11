@@ -1,9 +1,5 @@
 <template>
     <div id='vuewrapper' style="height: 100%;">
-        <div v-if="showCesiumTokenWarning" class="global-token-warning">
-            Warning: Cesium token is not configured. 3D map imagery and terrain may not load.
-            Configure it by setting VUE_APP_CESIUM_TOKEN in the environment.
-        </div>
         <template v-if="(state.mapLoading && !state.mapError) || state.plotLoading">
             <div id="waiting">
                 <atom-spinner
@@ -37,12 +33,22 @@
                      v-if="state.showMap">
                     <div class="col-12 noPadding">
                         <CesiumViewer v-if="state.mapAvailable && mapOk && !state.mapError" ref="cesiumViewer"/>
+                        <button
+                            v-if="state.mapDebug"
+                            type="button"
+                            class="map-debug-toggle"
+                            :title="showMapDebug ? 'Hide map debug info' : 'Show map debug info'"
+                            @click="showMapDebug = !showMapDebug">
+                            <i class="fas fa-terminal"></i>
+                        </button>
+                        <pre v-if="state.mapDebug && showMapDebug" class="map-debug-panel">{{ state.mapDebug }}</pre>
                         <div v-if="state.mapError" class="map-error-container">
                             <i class="fas fa-exclamation-triangle"></i>
                             <h3>Map Initialization Failed</h3>
                             <p>{{ state.mapError }}</p>
                             <button
-                                @click="state.mapError = null; state.showMap = false"
+                                type="button"
+                                @click.stop.prevent="dismissMapError"
                                 class="btn btn-outline-info btn-sm">Dismiss</button>
                         </div>
                         <div v-else-if="!(state.mapAvailable && mapOk)" class="map-error-container">
@@ -77,23 +83,19 @@ import { Color } from 'cesium'
 import colormap from 'colormap'
 import { DataflashDataExtractor } from '../tools/dataflashDataExtractor'
 import { MavlinkDataExtractor } from '../tools/mavlinkDataExtractor'
+import { Px4DataExtractor } from '../tools/px4DataExtractor'
 import { DjiDataExtractor } from '../tools/djiDataExtractor'
 import MagFitTool from '@/components/widgets/MagFitTool.vue'
 import EkfHelperTool from '@/components/widgets/EkfHelperTool.vue'
 import Vue from 'vue'
-
-const runtimeConfig = (typeof window !== 'undefined' && window.__APP_CONFIG__) || {}
-const cesiumToken = typeof runtimeConfig.VUE_APP_CESIUM_TOKEN === 'string'
-    ? runtimeConfig.VUE_APP_CESIUM_TOKEN.trim()
-    : ''
 
 export default {
     name: 'Home',
     created () {
         this.$eventHub.$on('messagesDoneLoading', this.extractFlightData)
         this.state.messages = {}
-        this.state.timeAttitude = []
-        this.state.timeAttitudeQ = []
+        this.state.timeAttitude = {}
+        this.state.timeAttitudeQ = {}
         this.state.currentTrajectory = []
         isOnline().then(a => { this.state.isOnline = a })
     },
@@ -103,52 +105,80 @@ export default {
     data () {
         return {
             state: store,
-            dataExtractor: null
+            dataExtractor: null,
+            showMapDebug: false
         }
     },
     methods: {
-        extractFlightData () {
-            if (this.dataExtractor === null) {
-                if (this.state.logType === 'tlog') {
-                    this.dataExtractor = MavlinkDataExtractor
-                } else if (this.state.logType === 'dji') {
-                    this.dataExtractor = DjiDataExtractor
-                } else {
-                    this.dataExtractor = DataflashDataExtractor
-                }
+        dismissMapError () {
+            this.state.mapError = null
+            this.state.mapLoading = false
+            this.state.showMap = false
+            this.state.mapAvailable = false
+        },
+        resetDerivedFlightData () {
+            this.dataExtractor = null
+            this.state.flightModeChanges = []
+            this.state.events = []
+            this.state.mission = []
+            this.state.fences = []
+            this.state.textMessages = []
+            this.state.namedFloats = []
+            this.state.params = undefined
+            this.state.defaultParams = {}
+            this.state.vehicle = undefined
+            this.state.attitudeSources = { quaternions: [], eulers: [] }
+            this.state.attitudeSource = null
+            this.state.timeAttitude = {}
+            this.state.timeAttitudeQ = {}
+            this.state.trajectorySources = []
+            this.state.trajectorySource = ''
+            this.state.trajectories = {}
+            this.state.currentTrajectory = []
+            this.state.timeTrajectory = {}
+            this.state.timeRange = null
+            this.state.mapAvailable = false
+            this.state.mapError = null
+            this.state.mapLoading = false
+            this.state.mapDebug = ''
+        },
+        selectDataExtractor () {
+            if (this.state.logType === 'tlog') {
+                return MavlinkDataExtractor
             }
+            if (this.state.logType === 'px4') {
+                return Px4DataExtractor
+            }
+            if (this.state.logType === 'dji') {
+                return DjiDataExtractor
+            }
+            return DataflashDataExtractor
+        },
+        extractFlightData () {
+            this.resetDerivedFlightData()
+            this.dataExtractor = this.selectDataExtractor()
             if ('FMTU' in this.state.messages && this.state.messages.FMTU.length === 0) {
                 this.state.processStatus = 'ERROR PARSING?'
             }
 
-            if (this.state.flightModeChanges.length === 0) {
-                this.state.flightModeChanges = this.dataExtractor.extractFlightModes(this.state.messages)
-            }
+            this.state.flightModeChanges = this.dataExtractor.extractFlightModes(this.state.messages)
             Vue.delete(this.state.messages, 'MODE')
 
-            if (this.state.events.length === 0) {
-                this.state.events = this.dataExtractor.extractEvents(this.state.messages)
-            }
+            this.state.events = this.dataExtractor.extractEvents(this.state.messages)
             Vue.delete(this.state.messages, 'STAT')
             Vue.delete(this.state.messages, 'EV')
 
-            if (this.state.mission.length === 0) {
-                this.state.mission = this.dataExtractor.extractMission(this.state.messages)
-            }
+            this.state.mission = this.dataExtractor.extractMission(this.state.messages)
 
             Vue.delete(this.state.messages, 'CMD')
 
             this.state.vehicle = this.dataExtractor.extractVehicleType(this.state.messages)
-            if (this.state.params === undefined) {
-                this.state.params = this.dataExtractor.extractParams(this.state.messages)
-                if (this.state.params !== undefined) {
-                    this.state.defaultParams = this.dataExtractor.extractDefaultParams(this.state.messages)
-                    if (this.state.params !== undefined) {
-                        this.$eventHub.$on('cesium-time-changed', (time) => {
-                            this.state.params.seek(time)
-                        })
-                    }
-                }
+            this.state.params = this.dataExtractor.extractParams(this.state.messages)
+            if (this.state.params !== undefined) {
+                this.state.defaultParams = this.dataExtractor.extractDefaultParams(this.state.messages)
+                this.$eventHub.$on('cesium-time-changed', (time) => {
+                    this.state.params.seek(time)
+                })
             }
             if (this.state.vehicle === 'quadcopter') {
                 if (this.state.params?.get('FRAME_TYPE') === 0) {
@@ -157,9 +187,7 @@ export default {
                     this.state.vehicle += 'x'
                 }
             }
-            if (this.state.textMessages.length === 0) {
-                this.state.textMessages = this.dataExtractor.extractTextMessages(this.state.messages)
-            }
+            this.state.textMessages = this.dataExtractor.extractTextMessages(this.state.messages)
             Vue.delete(this.state.messages, 'MSG')
 
             if (this.state.colors.length === 0) {
@@ -176,35 +204,46 @@ export default {
                 this.state.timeAttitude = this.dataExtractor.extractAttitude(this.state.messages, source)
             }
 
-            const list = Object.keys(this.state.timeAttitude)
-            this.state.lastTime = parseInt(list[list.length - 1])
+            const attitudeTimes = Object.keys(this.state.timeAttitudeQ).length > 0
+                ? this.state.timeAttitudeQ
+                : this.state.timeAttitude
+            const list = Object.keys(attitudeTimes)
+            this.state.lastTime = list.length > 0 ? parseInt(list[list.length - 1]) : null
 
             this.state.trajectorySources = this.dataExtractor.extractTrajectorySources(this.state.messages)
             if (this.state.trajectorySources.length > 0) {
-                const first = this.state.trajectorySources[0]
-                this.state.trajectorySource = first
-                this.state.trajectories = this.dataExtractor.extractTrajectory(
-                    this.state.messages,
-                    first
-                )
-                try {
-                    this.state.currentTrajectory = this.state.trajectories[first].trajectory
-                    this.state.timeTrajectory = this.state.trajectories[first].timeTrajectory
-                } catch {
-                    console.log('unable to load trajectory')
-                }
-            }
-            try {
-                if (this.state.messages?.GPS?.time_boot_ms) {
-                    this.state.metadata = { startTime: this.dataExtractor.extractStartTime(this.state.messages.GPS) }
-                } else {
-                    this.state.metadata = {
-                        startTime: this.dataExtractor.extractStartTime(this.state.messages['GPS[0]'])
+                for (const source of this.state.trajectorySources) {
+                    const trajectories = this.dataExtractor.extractTrajectory(
+                        this.state.messages,
+                        source
+                    )
+                    if (trajectories[source] && trajectories[source].trajectory.length > 0) {
+                        this.state.trajectorySource = source
+                        this.state.trajectories = trajectories
+                        this.state.currentTrajectory = trajectories[source].trajectory
+                        this.state.timeTrajectory = trajectories[source].timeTrajectory
+                        break
                     }
                 }
-            } catch (error) {
-                console.log('unable to load metadata')
-                console.log(error)
+                if (this.state.currentTrajectory.length === 0) {
+                    console.log('unable to load trajectory from any source', this.state.trajectorySources)
+                }
+            }
+            if (this.state.logType !== 'px4') {
+                try {
+                    if (this.state.messages?.GPS?.time_boot_ms) {
+                        this.state.metadata = {
+                            startTime: this.dataExtractor.extractStartTime(this.state.messages.GPS)
+                        }
+                    } else {
+                        this.state.metadata = {
+                            startTime: this.dataExtractor.extractStartTime(this.state.messages['GPS[0]'])
+                        }
+                    }
+                } catch (error) {
+                    console.log('unable to load metadata')
+                    console.log(error)
+                }
             }
             try {
                 this.state.namedFloats = this.dataExtractor.extractNamedValueFloatNames(this.state.messages)
@@ -224,12 +263,15 @@ export default {
             // Change to plot view after 2 seconds so the Processed status is readable
             setTimeout(() => { this.$eventHub.$emit('set-selected', 'plot') }, 2000)
 
-            // Only set showMap to true if it is available and was previously unavailable
-            if (!this.state.mapAvailable) {
-                this.state.mapAvailable = this.state.currentTrajectory.length > 0
-                if (this.state.mapAvailable) {
-                    this.state.showMap = true
-                }
+            this.state.mapAvailable = this.state.currentTrajectory.length > 0
+            this.state.showMap = true
+            if (this.state.mapAvailable) {
+                this.state.mapDebug = `PX4/map data ready: ${this.state.trajectorySource}, ` +
+                    `${this.state.currentTrajectory.length} trajectory points`
+            } else {
+                this.state.mapDebug = this.dataExtractor.diagnoseTrajectorySources
+                    ? this.dataExtractor.diagnoseTrajectorySources(this.state.messages)
+                    : 'No usable trajectory source found in this log.'
             }
         },
 
@@ -267,15 +309,9 @@ export default {
         EkfHelperTool
     },
     computed: {
-        showCesiumTokenWarning () {
-            return !cesiumToken
-        },
         mapOk () {
-            return (this.state.flightModeChanges !== undefined &&
-                    this.state.currentTrajectory !== undefined &&
-                    this.state.currentTrajectory.length > 0 &&
-                    (Object.keys(this.state.timeAttitude).length > 0 ||
-                        Object.keys(this.state.timeAttitudeQ).length > 0))
+            return (this.state.currentTrajectory !== undefined &&
+                    this.state.currentTrajectory.length > 0)
         },
         setOfModes () {
             const set = []
@@ -295,21 +331,6 @@ export default {
 
 <!-- Add "scoped" attribute to limit CSS to this component only -->
 <style scoped>
-
-    .global-token-warning {
-        position: fixed;
-        top: 8px;
-        left: 8px;
-        right: 8px;
-        z-index: 1200;
-        padding: 10px 12px;
-        border: 1px solid #f2b000;
-        border-radius: 4px;
-        background: rgba(44, 33, 10, 0.95);
-        color: #ffd75e;
-        font-family: 'Montserrat', sans-serif;
-        font-size: 12px;
-    }
 
     .nav-side-menu ul :not(collapsed) .arrow:before,
     .nav-side-menu li :not(collapsed) .arrow:before {
@@ -346,9 +367,51 @@ export default {
     }
 
     .noPadding {
+        position: relative;
         padding-left: 4px;
         padding-right: 6px;
         max-height: 100%;
+    }
+
+    .map-debug-toggle {
+        position: absolute;
+        left: 14px;
+        bottom: 14px;
+        z-index: 1110;
+        width: 34px;
+        height: 34px;
+        padding: 0;
+        border: 1px solid rgba(100, 233, 255, 0.65);
+        border-radius: 4px;
+        background: rgba(0, 0, 0, 0.66);
+        color: #bff7ff;
+        cursor: pointer;
+    }
+
+    .map-debug-toggle i {
+        margin: 0;
+        font-size: 13px;
+    }
+
+    .map-debug-panel {
+        position: absolute;
+        left: 14px;
+        bottom: 54px;
+        z-index: 1100;
+        max-width: min(520px, calc(100% - 28px));
+        max-height: 150px;
+        margin: 0;
+        padding: 8px 10px;
+        border: 1px solid rgba(100, 233, 255, 0.55);
+        border-radius: 4px;
+        background: rgba(0, 0, 0, 0.72);
+        color: #bff7ff;
+        font-family: monospace;
+        font-size: 12px;
+        line-height: 1.4;
+        white-space: pre-wrap;
+        overflow: hidden;
+        pointer-events: none;
     }
 
     div #waiting {

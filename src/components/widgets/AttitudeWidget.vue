@@ -42,6 +42,19 @@ class Interpolator {
     }
 }
 
+function quaternionToRollPitch (q) {
+    const q0 = q[0]
+    const q1 = q[1]
+    const q2 = q[2]
+    const q3 = q[3]
+    const sinrCosp = 2 * (q0 * q1 + q2 * q3)
+    const cosrCosp = 1 - 2 * (q1 * q1 + q2 * q2)
+    const roll = Math.atan2(sinrCosp, cosrCosp)
+    const sinp = 2 * (q0 * q2 - q3 * q1)
+    const pitch = Math.abs(sinp) >= 1 ? Math.sign(sinp) * Math.PI / 2 : Math.asin(sinp)
+    return [roll, pitch]
+}
+
 export default {
     name: 'AttitudeViewer',
     mixins: [baseWidget],
@@ -83,6 +96,21 @@ export default {
             for (const i in msg.time_boot_ms) {
                 y.push([-msg.Roll[i], msg.Pitch[i]])
             }
+        } else if (Object.keys(this.state.timeAttitude).length > 0) {
+            x = Object.keys(this.state.timeAttitude).map(time => parseInt(time))
+            y = x.map(time => {
+                const attitude = this.state.timeAttitude[time]
+                return [attitude[0] * -180 / Math.PI, attitude[1] * 180 / Math.PI]
+            })
+        } else if (Object.keys(this.state.timeAttitudeQ).length > 0) {
+            x = Object.keys(this.state.timeAttitudeQ).map(time => parseInt(time))
+            y = x.map(time => {
+                const attitude = quaternionToRollPitch(this.state.timeAttitudeQ[time])
+                return [attitude[0] * -180 / Math.PI, attitude[1] * 180 / Math.PI]
+            })
+        } else {
+            x = [0]
+            y = [[0, 0]]
         }
         this.interpolated = new Interpolator(x, y)
         this.$eventHub.$on('cesium-time-changed', this.setTime)

@@ -69,6 +69,7 @@ import tzlookup from 'tz-lookup'
 import { store } from './Globals.js'
 import { DataflashDataExtractor } from '../tools/dataflashDataExtractor'
 import { MavlinkDataExtractor } from '../tools/mavlinkDataExtractor'
+import { Px4DataExtractor } from '../tools/px4DataExtractor'
 import { DjiDataExtractor } from '../tools/djiDataExtractor'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 import CesiumSettingsWidget from './widgets/CesiumSettingsWidget.vue'
@@ -104,6 +105,21 @@ function getMaxTime (data) {
     return data.reduce((max, p) => p[3] > max ? p[3] : max, data[0][3])
 }
 
+function isFiniteTrajectoryPoint (point) {
+    return Array.isArray(point) &&
+        point.length >= 4 &&
+        Number.isFinite(point[0]) &&
+        Number.isFinite(point[1]) &&
+        Number.isFinite(point[2]) &&
+        Number.isFinite(point[3]) &&
+        Math.abs(point[1]) <= 90 &&
+        Math.abs(point[0]) <= 180
+}
+
+function isFiniteArray (array) {
+    return Array.isArray(array) && array.every(value => Number.isFinite(value))
+}
+
 export default {
     name: 'CesiumViewer',
 
@@ -120,6 +136,7 @@ export default {
         CesiumSettingsWidget
     },
     created () {
+        this.state.mapDebug = 'Cesium: component created'
         this.updateShader()
         // The objects declared here are not watched by Vue
         this.viewer = null // Cesium viewer instance
@@ -127,6 +144,7 @@ export default {
         this.waypoints = null // Autopilot Waypoints
         this.trajectory = null // GPS trajectory (in degrees)
         this.correctedTrajectory = [] // GPS trajectory (Cartographic array)
+        this.terrainEnabled = false
 
         // Link time with plot updates
         this.$eventHub.$on('hoveredTime', this.showAttitude)
@@ -145,14 +163,19 @@ export default {
         async asyncSetup () {
             try {
                 if (this.viewer == null) {
-                    if (this.state.isOnline) {
+                    const canUseCesiumIon = this.state.isOnline && cesiumToken.length > 0
+                    if (canUseCesiumIon) {
                         this.viewer = this.createViewer(true)
                         if (this.state.vehicle !== 'boat') {
                             this.viewer.terrainProvider = await createWorldTerrainAsync()
+                            this.terrainEnabled = true
                         }
                     } else {
                         this.viewer = this.createViewer(false)
                     }
+                    this.state.mapDebug = 'Cesium: viewer created\n' +
+                        `online=${canUseCesiumIon}, terrain=${this.terrainEnabled}\n` +
+                        `container=${this.viewer.container.clientWidth}x${this.viewer.container.clientHeight}`
                     this.viewer.scene.debugShowFramesPerSecond = true
 
                     this.viewer.scene.postProcessStages.ambientOcclusion.enabled = false
@@ -168,7 +191,8 @@ export default {
                             this.viewer.zoomTo(this.viewer.entities)
                         })
                     this.viewer.animation.viewModel.setShuttleRingTicks([0.1, 0.25, 0.5, 0.75, 1, 2, 5, 10, 15])
-                    this.viewer.scene.globe.depthTestAgainstTerrain = true
+                    this.viewer.scene.globe.depthTestAgainstTerrain = this.terrainEnabled
+                    this.configureCameraControls()
                     this.viewer.shadowMap.maxmimumDistance = 10000.0
                     this.viewer.shadowMap.softShadows = true
                     this.viewer.shadowMap.size = 4096
@@ -216,13 +240,17 @@ export default {
                         150.0,
                         1.0
                     )
-                    this.viewer.scene.globe.translucency.enabled = true
+                    this.viewer.scene.globe.translucency.enabled = this.terrainEnabled
                     this.viewer.scene.screenSpaceCameraController.enableCollisionDetection = false
-                    this.viewer.scene.globe.undergroundColor = Color.MIDNIGHTBLUE
+                    this.viewer.scene.backgroundColor = Color.fromCssColorString('#10151c')
+                    this.viewer.scene.globe.baseColor = Color.fromCssColorString('#667078')
+                    this.viewer.scene.globe.undergroundColor = Color.fromCssColorString('#4d565f')
                     this.viewer.scene.globe.undergroundColorAlphaByDistance.near = 2
                     this.viewer.scene.globe.undergroundColorAlphaByDistance.far = 10
                     this.viewer.scene.globe.undergroundColorAlphaByDistance.nearValue = 0.2
                     this.viewer.scene.globe.undergroundColorAlphaByDistance.farValue = 1.0
+                    this.viewer.resize()
+                    this.viewer.scene.requestRender()
                 }
                 this.addBathymetryButton()
                 this.addCenterVehicleButton()
@@ -232,8 +260,10 @@ export default {
                 for (const pos of this.state.currentTrajectory) {
                     this.correctedTrajectory.push(Cartographic.fromDegrees(pos[0], pos[1], pos[2]))
                 }
+                this.state.mapDebug = this.state.mapDebug + '\n' +
+                    `raw trajectory points=${this.state.currentTrajectory.length}`
 
-                if (this.state.vehicle !== 'boat' && this.state.isOnline && this.correctedTrajectory.length > 0) {
+                if (this.terrainEnabled && this.correctedTrajectory.length > 0) {
                     const promise = sampleTerrainMostDetailed(this.viewer.terrainProvider, this.correctedTrajectory)
                     promise.then(async (result) => { await this.setup2(result) })
                 } else {
@@ -268,7 +298,7 @@ export default {
                         homeButton: false,
                         timeline: true,
                         animation: true,
-                        requestRenderMode: true,
+                        requestRenderMode: false,
                         shouldAnimate: false,
                         scene3DOnly: false,
                         selectionIndicator: false,
@@ -291,14 +321,17 @@ export default {
                     homeButton: false,
                     timeline: true,
                     animation: true,
-                    requestRenderMode: true,
+                    requestRenderMode: false,
                     shouldAnimate: false,
                     scene3DOnly: false,
                     selectionIndicator: false,
                     shadows: true,
                     orderIndependentTranslucency: false,
                     baseLayerPicker: false,
-                    imageryProvider: false,
+                    imageryProvider: new UrlTemplateImageryProvider({
+                        url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                        credit: 'Map tiles by OpenStreetMap.'
+                    }),
                     geocoder: false,
                     useBrowserRecommendedResolution: false
                 }
@@ -389,26 +422,34 @@ export default {
                 if (!updatedPositions || updatedPositions.length === 0) {
                     throw new Error('No GPS trajectory available in this log file.')
                 }
-                this.state.trajectorySource = this.state.trajectorySources[0]
-                this.loadTrajectory(this.state.trajectorySource)
+                if (!this.state.trajectorySource && this.state.trajectorySources.length > 0) {
+                    this.state.trajectorySource = this.state.trajectorySources[0]
+                }
+                if (this.state.trajectorySource) {
+                    this.loadTrajectory(this.state.trajectorySource)
+                }
                 this.state.heightOffset = 0
                 this.state.heightOffset = updatedPositions[0].height
                 this.processTrajectory(this.state.currentTrajectory)
+                this.addTrajectoryGroundPatch()
                 this.addModel()
                 this.updateAndPlotTrajectory()
+                this.focusOnTrajectory()
+                this.state.cameraType = 'free'
+                this.viewer.trackedEntity = undefined
+                this.viewer.resize()
+                this.viewer.scene.requestRender()
+                this.state.mapLoading = false
                 await this.plotMission(this.state.mission)
                 this.plotFences(this.state.fences)
                 document.addEventListener('setzoom', this.onTimelineZoom)
                 this.$eventHub.$on('rangeChanged', this.onRangeChanged)
 
-                // TODO: Find a better way to know that cesium finished loading
-                setTimeout(() => { this.state.mapLoading = false }, 2000)
-                this.state.cameraType = 'follow'
-                this.changeCamera()
                 setTimeout(this.updateTimelineColors, 500)
                 setInterval(this.updateGlobeOpacity, 1000)
                 setTimeout(() => {
-                    this.viewer.flyTo(this.viewer.entities)
+                    this.viewer.resize()
+                    this.focusOnTrajectory()
                 }, 1000)
             } catch (e) {
                 console.error('Error in Cesium setup2:', e)
@@ -446,6 +487,10 @@ export default {
             /*
             Makes the Globe transparent when the vehicle is underground/underwater. Called every 1 second
             */
+            if (!this.terrainEnabled) {
+                this.viewer.scene.globe.translucency.enabled = false
+                return
+            }
             if (!this.viewer.clock.currentTime) {
                 console.log('no time')
                 return
@@ -470,7 +515,7 @@ export default {
                 }
             }.bind(this)
 
-            if (this.state.vehicle === 'boat') {
+            if (this.state.vehicle === 'boat' || !this.terrainEnabled) {
                 update([position])
                 console.log('skipping sample')
             } else {
@@ -637,6 +682,17 @@ export default {
                 this.viewer.trackedEntity = undefined
             }
         },
+        configureCameraControls () {
+            const controller = this.viewer.scene.screenSpaceCameraController
+            controller.inertiaSpin = 0.08
+            controller.inertiaTranslate = 0.06
+            controller.inertiaZoom = 0.05
+            controller.maximumMovementRatio = 0.018
+            controller.minimumZoomDistance = 5
+            if (controller._zoomFactor !== undefined) {
+                controller._zoomFactor = 1.6
+            }
+        },
         onAnimationChange (isAnimating) {
             this.$eventHub.$emit('animation-changed', isAnimating)
         },
@@ -777,6 +833,16 @@ export default {
         processTrajectory () {
             this.correctedTrajectory = []
             this.points = this.state.trajectories[this.state.trajectorySource].trajectory
+                .filter(isFiniteTrajectoryPoint)
+            if (this.points.length === 0) {
+                throw new Error('No valid finite GPS trajectory points available in this log file.')
+            }
+            const first = this.points[0]
+            const last = this.points[this.points.length - 1]
+            this.state.mapDebug = this.state.mapDebug + '\n' +
+                `source=${this.state.trajectorySource}, valid points=${this.points.length}\n` +
+                `first lon/lat/alt/t=${first.map(value => Number(value).toFixed(6)).join(', ')}\n` +
+                `last lon/lat/alt/t=${last.map(value => Number(value).toFixed(6)).join(', ')}`
             for (const pos of this.points) {
                 this.correctedTrajectory.push(Cartographic.fromDegrees(pos[0], pos[1], pos[2]))
             }
@@ -806,6 +872,7 @@ export default {
             }
             // Create sampled position
             const isBoat = this.state.vehicle === 'boat'
+            const visualHeightOffset = this.terrainEnabled ? 0 : 20
             for (const posIndex in this.points) {
                 const pos = this.points[posIndex]
                 if (isBoat) {
@@ -814,7 +881,7 @@ export default {
                     position = Cartesian3.fromDegrees(
                         pos[0],
                         pos[1],
-                        pos[2] + this.heightOffset
+                        pos[2] + this.heightOffset + visualHeightOffset
                     )
                 }
                 this.positions.push(position)
@@ -834,6 +901,100 @@ export default {
                     this.model.position = this.sampledPos
                 }
             }
+            this.addFallbackTrajectoryEntity()
+        },
+        addFallbackTrajectoryEntity () {
+            if (this.fallbackTrajectory !== undefined) {
+                this.viewer.entities.remove(this.fallbackTrajectory)
+            }
+            if (this.startMarker !== undefined) {
+                this.viewer.entities.remove(this.startMarker)
+            }
+            const visualHeightOffset = this.terrainEnabled ? 0 : 20
+            const positions = this.points.map(pos => Cartesian3.fromDegrees(
+                pos[0],
+                pos[1],
+                pos[2] + this.heightOffset + visualHeightOffset
+            ))
+            if (positions.length > 1) {
+                this.fallbackTrajectory = this.viewer.entities.add({
+                    polyline: {
+                        positions: positions,
+                        width: 3,
+                        material: Color.CYAN
+                    }
+                })
+            }
+            this.startMarker = this.viewer.entities.add({
+                position: positions[0],
+                point: {
+                    pixelSize: 12,
+                    color: Color.YELLOW,
+                    outlineColor: Color.BLACK,
+                    outlineWidth: 2
+                }
+            })
+            this.state.mapDebug = this.state.mapDebug + '\n' +
+                `fallback polyline positions=${positions.length}`
+        },
+        addTrajectoryGroundPatch () {
+            if (this.terrainEnabled || !this.points || this.points.length === 0) {
+                return
+            }
+            if (this.groundPatch !== undefined) {
+                this.viewer.entities.remove(this.groundPatch)
+            }
+            const lonValues = this.points.map(point => point[0])
+            const latValues = this.points.map(point => point[1])
+            const minLon = Math.min(...lonValues)
+            const maxLon = Math.max(...lonValues)
+            const minLat = Math.min(...latValues)
+            const maxLat = Math.max(...latValues)
+            const span = Math.max(maxLon - minLon, maxLat - minLat, 0.0005)
+            const pad = span * 0.45
+            this.groundPatch = this.viewer.entities.add({
+                rectangle: {
+                    coordinates: Rectangle.fromDegrees(
+                        minLon - pad,
+                        minLat - pad,
+                        maxLon + pad,
+                        maxLat + pad
+                    ),
+                    material: Color.fromCssColorString('#58626b').withAlpha(0.92),
+                    outline: true,
+                    outlineColor: Color.WHITE.withAlpha(0.35)
+                }
+            })
+        },
+        focusOnTrajectory () {
+            if (!this.points || this.points.length === 0) {
+                return
+            }
+            const lonValues = this.points.map(point => point[0])
+            const latValues = this.points.map(point => point[1])
+            const altValues = this.points.map(point => point[2])
+            const minLon = Math.min(...lonValues)
+            const maxLon = Math.max(...lonValues)
+            const minLat = Math.min(...latValues)
+            const maxLat = Math.max(...latValues)
+            const maxAlt = Math.max(...altValues.map(value => Math.abs(value)))
+            const centerLon = (minLon + maxLon) / 2
+            const centerLat = (minLat + maxLat) / 2
+            const spanMeters = Math.max(maxLon - minLon, maxLat - minLat) * 111000
+            const height = Math.max(500, spanMeters * 2.5, maxAlt + 500)
+            this.viewer.camera.setView({
+                destination: Cartesian3.fromDegrees(centerLon, centerLat, height),
+                orientation: {
+                    heading: 0,
+                    pitch: -Math.PI / 2,
+                    roll: 0
+                }
+            })
+            const canvas = this.viewer.scene.canvas
+            this.state.mapDebug = this.state.mapDebug + '\n' +
+                `camera focused center=${centerLon.toFixed(6)}, ${centerLat.toFixed(6)}, height=${height.toFixed(1)}` +
+                `, canvas=${canvas.clientWidth}x${canvas.clientHeight}`
+            this.viewer.scene.requestRender()
         },
         aggregateDepth (bathymetry, positions) {
             const positionsWithDepth = []
@@ -1049,11 +1210,16 @@ export default {
             )
             let fixedFrameTransform = Transforms.localFrameToFixedFrameGenerator('north', 'west')
             const sampledOrientation = new SampledProperty(Quaternion)
+            let orientationSamples = 0
+            const modelPitchOffset = this.getModelPitchOffset()
             if (Object.keys(this.state.timeAttitudeQ).length > 0) {
                 fixedFrameTransform = Transforms.localFrameToFixedFrameGenerator('north', 'east')
                 for (const atti in this.state.timeAttitudeQ) {
                     if (this.state.timeAttitudeQ[atti]) {
                         const att = this.state.timeAttitudeQ[atti]
+                        if (!isFiniteArray(att)) {
+                            continue
+                        }
 
                         const q1 = att[0]
                         const q2 = att[1]
@@ -1066,10 +1232,13 @@ export default {
                             pitch = 0
                         }
                         const yaw = Math.atan2(2.0 * (q1 * q4 + q2 * q3), 1.0 - 2.0 * (q3 * q3 + q4 * q4))
+                        if (!Number.isFinite(roll) || !Number.isFinite(pitch) || !Number.isFinite(yaw)) {
+                            continue
+                        }
                         // TODO: fix this coordinate system!
                         const hpRoll = Transforms.headingPitchRollQuaternion(
                             position,
-                            new HeadingPitchRoll(-yaw, -pitch, roll - 3.14),
+                            new HeadingPitchRoll(-yaw, -pitch + modelPitchOffset, roll - Math.PI),
                             Ellipsoid.WGS84,
                             fixedFrameTransform
                         )
@@ -1079,15 +1248,19 @@ export default {
                             new JulianDate())
 
                         sampledOrientation.addSample(time, hpRoll)
+                        orientationSamples += 1
                     }
                 }
             } else {
                 for (const atti in this.state.timeAttitude) {
                     if (this.state.timeAttitude[atti]) {
                         const att = this.state.timeAttitude[atti]
+                        if (!isFiniteArray(att)) {
+                            continue
+                        }
                         const hpRoll = Transforms.headingPitchRollQuaternion(
                             position,
-                            new HeadingPitchRoll(att[2], att[1], att[0]),
+                            new HeadingPitchRoll(att[2], att[1] + modelPitchOffset, att[0]),
                             Ellipsoid.WGS84,
                             fixedFrameTransform
                         )
@@ -1097,25 +1270,31 @@ export default {
                             new JulianDate()
                         )
                         sampledOrientation.addSample(time, hpRoll)
+                        orientationSamples += 1
                     }
                 }
             }
 
             // Add airplane model with interpolated position and orientation
-            this.model = this.viewer.entities.add({
+            const entityOptions = {
                 availability: new TimeIntervalCollection([new TimeInterval({
                     start: this.start,
                     stop: this.stop
                 })]),
                 position: this.sampledPos,
-                orientation: sampledOrientation,
                 model: {
                     uri: this.getVehicleModel(),
-                    minimumPixelSize: 15,
-                    scale: this.modelScale / 10
+                    minimumPixelSize: this.getModelMinimumPixelSize(),
+                    scale: this.getModelScale()
                 },
                 viewFrom: new Cartesian3(5, 0, 3)
-            })
+            }
+            if (orientationSamples > 0) {
+                entityOptions.orientation = sampledOrientation
+            }
+            this.state.mapDebug = this.state.mapDebug + '\n' +
+                `orientation samples=${orientationSamples}`
+            this.model = this.viewer.entities.add(entityOptions)
             this.changeCamera()
             if (this.state.vehicle === 'boat') {
                 setTimeout(() => {
@@ -1130,6 +1309,7 @@ export default {
                 this.colorCoder = this.availableColorCoders[this.selectedColorCoder]
             }
             const isBoat = this.state.vehicle === 'boat'
+            const visualHeightOffset = this.terrainEnabled ? 0 : 20
             const startTime = this.cesiumTimeToMs(this.timelineStart)
             const endTime = this.cesiumTimeToMs(this.timelineStop)
             const geometryInstances = []
@@ -1151,7 +1331,7 @@ export default {
                 const position = Cartesian3.fromDegrees(
                     pos[0],
                     pos[1],
-                    isBoat ? 0.1 : pos[2] + this.heightOffset
+                    isBoat ? 0.1 : pos[2] + this.heightOffset + visualHeightOffset
                 )
 
                 const newColor = this.getModeColor(pos[3])
@@ -1162,7 +1342,7 @@ export default {
                         geometryInstances.push(new GeometryInstance({
                             geometry: new PolylineGeometry({
                                 positions: currentSegment,
-                                width: 3.0
+                                width: 2.0
                             }),
                             attributes: {
                                 color: ColorGeometryInstanceAttribute.fromColor(currentColor)
@@ -1181,7 +1361,7 @@ export default {
                 geometryInstances.push(new GeometryInstance({
                     geometry: new PolylineGeometry({
                         positions: currentSegment,
-                        width: 3.0
+                        width: 2.0
                     }),
                     attributes: {
                         color: ColorGeometryInstanceAttribute.fromColor(currentColor)
@@ -1220,7 +1400,7 @@ export default {
                 cesiumPoints.push(position)
                 cesiumPointsOrig.push(position)
             }
-            if (this.state.vehicle !== 'boat') {
+            if (this.state.vehicle !== 'boat' && this.terrainEnabled) {
                 sampleTerrainMostDetailed(this.viewer.terrainProvider, cesiumPoints, true).then((finalPoints) => {
                     this.plotMissionPoints(finalPoints, cesiumPointsOrig, points)
                 })
@@ -1348,6 +1528,9 @@ export default {
             if (type === 'submarine') {
                 return require('../assets/bluerovsimple.glb').default
             }
+            if (this.state.logType === 'px4') {
+                return require('../assets/plane.glb').default
+            }
             if (type === 'quadcopter+') {
                 return require('../assets/quadp.glb').default
             }
@@ -1359,11 +1542,30 @@ export default {
             }
             return require('../assets/plane.glb').default
         },
+        getModelMinimumPixelSize () {
+            return this.state.logType === 'px4' ? 18 : 15
+        },
+        getModelScale () {
+            if (this.state.logType === 'px4') {
+                return this.modelScale / 18
+            }
+            return this.modelScale / 10
+        },
+        getModelPitchOffset () {
+            if (this.state.logType !== 'px4') {
+                return 0
+            }
+            // The current PX4 target is a tail-sitter VTOL, so display the fixed-wing
+            // model in the tail-sitter convention: nose-up at the initial vertical pose.
+            return -Math.PI / 2
+        },
         loadTrajectory (source) {
             this.waitForMessages([source]).then(() => {
                 let dataExtractor = null
                 if (this.state.logType === 'tlog') {
                     dataExtractor = MavlinkDataExtractor
+                } else if (this.state.logType === 'px4') {
+                    dataExtractor = Px4DataExtractor
                 } else if (this.state.logType === 'dji') {
                     console.log('Using DJI extractor')
                     dataExtractor = DjiDataExtractor
@@ -1379,6 +1581,8 @@ export default {
                 let dataExtractor = null
                 if (this.state.logType === 'tlog') {
                     dataExtractor = MavlinkDataExtractor
+                } else if (this.state.logType === 'px4') {
+                    dataExtractor = Px4DataExtractor
                 } else {
                     dataExtractor = DataflashDataExtractor
                 }
@@ -1533,8 +1737,12 @@ export default {
 
 <style scoped>
     #cesiumContainer {
-        display: flex;
+        position: absolute;
+        inset: 0;
+        display: block;
+        width: 100%;
         height: 100%;
+        background: #000;
     }
 
     #loadingOverlay h1 {
@@ -1577,8 +1785,10 @@ export default {
     }
 
     #wrapper {
+        position: relative;
         width: 100%;
         height: 100%;
+        min-height: 320px;
     }
 
     .mode {

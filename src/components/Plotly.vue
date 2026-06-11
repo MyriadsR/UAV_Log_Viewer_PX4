@@ -17,6 +17,10 @@ let annotationsEvents = []
 const annotationsModes = []
 let annotationsParams = []
 
+function escapeRegExp (string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 const updatemenus = [
     {
         active: 0,
@@ -608,12 +612,26 @@ export default {
             return names.join(', ')
         },
         findMessagesInExpression (expression) {
-            const RE = /(?<message>[A-Z][A-Z0-9_]+(\[[A-Za-z0-9_.]+\])?)(\.(?<field>[A-Za-z0-9_]+))?/g
-            const match = []
-            for (const m of expression.matchAll(RE)) {
-                match.push([m.groups.message, m.groups.field])
+            const matches = []
+            const seen = new Set()
+            const messageNames = this.messagesInLog
+                .slice()
+                .sort((a, b) => b.length - a.length)
+            for (const message of messageNames) {
+                const RE = new RegExp(
+                    `(^|[^A-Za-z0-9_])(${escapeRegExp(message)})(?:\\.([A-Za-z_][A-Za-z0-9_]*(?:\\[\\d+\\])?))?`,
+                    'g'
+                )
+                for (const m of expression.matchAll(RE)) {
+                    const field = m[3]
+                    const key = `${message}.${field || ''}`
+                    if (!seen.has(key)) {
+                        seen.add(key)
+                        matches.push([message, field])
+                    }
+                }
             }
-            return match
+            return matches
         },
         expressionCanBePlotted (expression, reask = false) {
             // TODO: USE this regex with lookahead once firefox supports it
@@ -636,6 +654,7 @@ export default {
                 if (field !== undefined) {
                     if (field !== 'time_boot_ms' && this.state.messageTypes[message].expressions.indexOf(field) < 0) {
                         console.log('ERROR: attempted to plot unavailable field: ' + field)
+                        this.state.plotLoading = false
                         return [false, `invalid field: ${message}.${field}`]
                     }
                 }
@@ -666,10 +685,11 @@ export default {
             console.log('MISS! evaluating : ' + expression1)
             // TODO: USE this regex with lookahead once firefox supports it
             // let RE = /(?<!\.)\b[A-Z][A-Z0-9_]+\b/g
-            let fields = this.findMessagesInExpression(expression1).map(field => field[0])
+            const references = this.findMessagesInExpression(expression1)
+            let fields = references.map(field => field[0])
+            fields = Array.from(new Set(fields))
             console.log(fields)
-            fields = fields === null ? [] : fields
-            const messages = fields.length !== 0 ? (fields) : []
+            const messages = fields.length !== 0 ? fields : []
             // use time of first message for now
             let x
             if (messages.length > 0) {
@@ -693,18 +713,20 @@ export default {
             const timeIndexes = new Array(fields.length).fill(0)
             const y = []
             let expression = expression1
-            // eslint-disable-next-line
-            for (let field in fields) {
-                if (isNaN(field)) {
+            for (const [message, field] of references) {
+                const messageIndex = fields.indexOf(message)
+                if (field !== undefined) {
+                    const source = `${message}.${field}`
+                    const target = `a[${messageIndex}][${JSON.stringify(field)}]`
+                    expression = expression.split(source).join(target)
+                }
+            }
+            for (const fieldIndex in fields) {
+                if (isNaN(fieldIndex)) {
                     break
                 }
-                // first looks for fields in the expression
-                if (expression.includes(`${fields[field]}.`)) {
-                    expression = expression.replaceAll(`${fields[field]}.`, 'a[' + field + '].')
-                    continue
-                }
-                // fallback to replacing message name instead
-                expression = expression.replaceAll(`${fields[field]}`, 'a[' + field + ']')
+                const RE = new RegExp(`\\b${escapeRegExp(fields[fieldIndex])}\\b`, 'g')
+                expression = expression.replace(RE, 'a[' + fieldIndex + ']')
             }
             let f
             try {
@@ -794,6 +816,7 @@ export default {
                 if (!canplot) {
                     errors.push(error)
                     this.state.expressionErrors = errors
+                    this.state.plotLoading = false
                     return
                 }
                 errors.push(null)
@@ -807,8 +830,10 @@ export default {
                 this.waitForMessages(messages).then(this.plot)
                     .catch((e) => {
                         alert(e)
+                        this.state.plotLoading = false
                         this.plot()
                     })
+                return
             }
 
             for (const expression of this.state.expressions) {

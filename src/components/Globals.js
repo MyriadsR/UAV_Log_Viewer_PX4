@@ -34,6 +34,7 @@ export const store = {
     processPercentage: -1,
     mapLoading: false,
     mapError: null,
+    mapDebug: '',
     plotLoading: false,
     timeRange: null,
     textMessages: [],
